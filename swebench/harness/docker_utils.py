@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import docker
-import docker.errors
 import os
 import signal
 import tarfile
@@ -9,18 +7,18 @@ import threading
 import time
 import traceback
 from pathlib import Path
-
-from docker.models.containers import Container
+import subprocess
+import spython.main
+from spython.instance import Instance
 
 HEREDOC_DELIMITER = "EOF_1399519320"  # different from dataset HEREDOC_DELIMITERs!
 
-
-def copy_to_container(container: Container, src: Path, dst: Path):
+def copy_to_container(instance: Instance, src: Path, dst: Path):
     """
-    Copy a file from local to a docker container
+    Copy a file from local to a Singularity container instance
 
     Args:
-        container (Container): Docker container to copy to
+        instance (Instance): Singularity container instance to copy to
         src (Path): Source file path
         dst (Path): Destination file path in the container
     """
@@ -30,177 +28,135 @@ def copy_to_container(container: Container, src: Path, dst: Path):
             f"Destination path parent directory cannot be empty!, dst: {dst}"
         )
 
-    # temporary tar file
-    tar_path = src.with_suffix(".tar")
-    with tarfile.open(tar_path, "w") as tar:
-        tar.add(src, arcname=src.name)
-
-    # get bytes for put_archive cmd
-    with open(tar_path, "rb") as tar_file:
-        data = tar_file.read()
-
     # Make directory if necessary
-    container.exec_run(f"mkdir -p {dst.parent}")
+    spython.main.execute(instance, ['mkdir', '-p', str(dst.parent)])
+    
+    # Copy file directly using Singularity's copy command
+    subprocess.run(['singularity', 'copy', str(src), f"{instance.name}:{dst}"], check=True)
 
-    # Send tar file to container and extract
-    container.put_archive(os.path.dirname(dst), data)
-    container.exec_run(f"tar -xf {dst}.tar -C {dst.parent}")
-
-    # clean up in locally and in container
-    tar_path.unlink()
-    container.exec_run(f"rm {dst}.tar")
-
-
-def write_to_container(container: Container, data: str, dst: Path):
+def write_to_container(instance: Instance, data: str, dst: Path):
     """
-    Write a string to a file in a docker container
+    Write a string to a file in a Singularity container
     """
-    # echo with heredoc to file
+    # Use echo with heredoc via shell execution
     command = f"cat <<'{HEREDOC_DELIMITER}' > {dst}\n{data}\n{HEREDOC_DELIMITER}"
-    container.exec_run(command)
+    spython.main.execute(instance, ['sh', '-c', command])
 
-
-def remove_image(client, image_id, logger=None):
+def remove_image(client, image_path: str, logger=None):
     """
-    Remove a Docker image by ID.
+    Remove a Singularity image file.
 
     Args:
-        client (docker.DockerClient): Docker client.
-        image_id (str): Image ID.
-        rm_image (bool): Whether to remove the image.
-        logger (logging.Logger): Logger to use for output. If None, print to stdout.
+        client: Not used (kept for API compatibility)
+        image_path (str): Path to the Singularity image file
+        logger (logging.Logger): Logger to use for output. If None, print to stdout
     """
     if not logger:
-        # if logger is None, print to stdout
         log_info = print
         log_error = print
         raise_error = True
     elif logger == "quiet":
-        # if logger is "quiet", don't print anything
         log_info = lambda x: None
         log_error = lambda x: None
         raise_error = True
     else:
-        # if logger is a logger object, use it
         log_error = logger.info
         log_info = logger.info
         raise_error = False
+
     try:
-        log_info(f"Attempting to remove image {image_id}...")
-        client.images.remove(image_id, force=True)
-        log_info(f"Image {image_id} removed.")
-    except docker.errors.ImageNotFound:
-        log_info(f"Image {image_id} not found, removing has no effect.")
+        log_info(f"Attempting to remove image {image_path}...")
+        os.remove(image_path)
+        log_info(f"Image {image_path} removed.")
+    except FileNotFoundError:
+        log_info(f"Image {image_path} not found, removing has no effect.")
     except Exception as e:
         if raise_error:
             raise e
         log_error(
-            f"Failed to remove image {image_id}: {e}\n" f"{traceback.format_exc()}"
+            f"Failed to remove image {image_path}: {e}\n" f"{traceback.format_exc()}"
         )
 
-
-def cleanup_container(client, container, logger):
+def cleanup_container(client, instance: Instance, logger):
     """
-    Stop and remove a Docker container.
-    Performs this forcefully if the container cannot be stopped with the python API.
-
+    Stop and remove a Singularity container instance.
+    
     Args:
-        client (docker.DockerClient): Docker client.
-        container (docker.models.containers.Container): Container to remove.
+        client: Not used (kept for API compatibility)
+        instance (Instance): Singularity instance to remove
         logger (logging.Logger): Logger to use for output. If None, print to stdout
     """
-    if not container:
+    if not instance:
         return
 
-    container_id = container.id
-
     if not logger:
-        # if logger is None, print to stdout
         log_error = print
         log_info = print
         raise_error = True
     elif logger == "quiet":
-        # if logger is "quiet", don't print anything
         log_info = lambda x: None
         log_error = lambda x: None
         raise_error = True
     else:
-        # if logger is a logger object, use it
         log_error = logger.info
         log_info = logger.info
         raise_error = False
 
-    # Attempt to stop the container
     try:
-        if container:
-            log_info(f"Attempting to stop container {container.name}...")
-            container.stop(timeout=15)
+        log_info(f"Attempting to stop instance {instance.name}...")
+        instance.stop()
+        log_info(f"Instance {instance.name} stopped.")
     except Exception as e:
         log_error(
-            f"Failed to stop container {container.name}: {e}. Trying to forcefully kill..."
+            f"Failed to stop instance {instance.name}: {e}. Trying to forcefully kill..."
         )
         try:
-            # Get the PID of the container
-            container_info = client.api.inspect_container(container_id)
-            pid = container_info["State"].get("Pid", 0)
-
-            # If container PID found, forcefully kill the container
+            # Get the PID of the instance
+            pid = instance.pid
             if pid > 0:
                 log_info(
-                    f"Forcefully killing container {container.name} with PID {pid}..."
+                    f"Forcefully killing instance {instance.name} with PID {pid}..."
                 )
                 os.kill(pid, signal.SIGKILL)
             else:
-                log_error(f"PID for container {container.name}: {pid} - not killing.")
+                log_error(f"PID for instance {instance.name}: {pid} - not killing.")
         except Exception as e2:
             if raise_error:
                 raise e2
             log_error(
-                f"Failed to forcefully kill container {container.name}: {e2}\n"
+                f"Failed to forcefully kill instance {instance.name}: {e2}\n"
                 f"{traceback.format_exc()}"
             )
 
-    # Attempt to remove the container
-    try:
-        log_info(f"Attempting to remove container {container.name}...")
-        container.remove(force=True)
-        log_info(f"Container {container.name} removed.")
-    except Exception as e:
-        if raise_error:
-            raise e
-        log_error(
-            f"Failed to remove container {container.name}: {e}\n"
-            f"{traceback.format_exc()}"
-        )
-
-
-def exec_run_with_timeout(container, cmd, timeout: int|None=60):
+def exec_run_with_timeout(instance: Instance, cmd: str, timeout: int|None=60):
     """
-    Run a command in a container with a timeout.
+    Run a command in a Singularity instance with a timeout.
 
     Args:
-        container (docker.Container): Container to run the command in.
-        cmd (str): Command to run.
-        timeout (int): Timeout in seconds.
+        instance (Instance): Instance to run the command in
+        cmd (str): Command to run
+        timeout (int): Timeout in seconds
     """
-    # Local variables to store the result of executing the command
     exec_result = b''
-    exec_id = None
+    exec_pid = None
     exception = None
     timed_out = False
 
-    # Wrapper function to run the command
     def run_command():
-        nonlocal exec_result, exec_id, exception
+        nonlocal exec_result, exec_pid, exception
         try:
-            exec_id = container.client.api.exec_create(container.id, cmd)["Id"]
-            exec_stream = container.client.api.exec_start(exec_id, stream=True)
-            for chunk in exec_stream:
-                exec_result += chunk
+            process = spython.main.execute(
+                instance,
+                cmd.split(),
+                stream=True,
+                return_result=True
+            )
+            exec_pid = process.pid
+            for line in process.stdout:
+                exec_result += line.encode()
         except Exception as e:
             exception = e
 
-    # Start the command in a separate thread
     thread = threading.Thread(target=run_command)
     start_time = time.time()
     thread.start()
@@ -209,96 +165,85 @@ def exec_run_with_timeout(container, cmd, timeout: int|None=60):
     if exception:
         raise exception
 
-    # If the thread is still alive, the command timed out
     if thread.is_alive():
-        if exec_id is not None:
-            exec_pid = container.client.api.exec_inspect(exec_id)["Pid"]
-            container.exec_run(f"kill -TERM {exec_pid}", detach=True)
+        if exec_pid is not None:
+            spython.main.execute(instance, ['kill', '-TERM', str(exec_pid)], stream=False)
         timed_out = True
+    
     end_time = time.time()
     return exec_result.decode(), timed_out, end_time - start_time
 
-
-def find_dependent_images(client: docker.DockerClient, image_name: str):
+def find_dependent_images(client, image_path: str):
     """
-    Find all images that are built upon `image_name` image
+    Find all Singularity images that are built upon the base image.
+    Note: Singularity doesn't track image dependencies like Docker. This is a best-effort implementation.
 
     Args:
-        client (docker.DockerClient): Docker client.
-        image_name (str): Name of the base image.
+        client: Not used (kept for API compatibility)
+        image_path (str): Path to the base image file
     """
-    dependent_images = []
+    # In Singularity, we need to implement this differently as it doesn't track dependencies
+    # This is a placeholder that could be implemented by parsing definition files
+    return []
 
-    # Get all local images
-    all_images = client.images.list()
-
-    # Get the ID of the base image
-    try:
-        base_image = client.images.get(image_name)
-        base_image_id = base_image.id
-    except docker.errors.ImageNotFound:
-        print(f"Base image {image_name} not found.")
-        return []
-
-    for image in all_images:
-        # Skip the base image itself
-        if image.id == base_image_id:
-            continue
-
-        # Check if the base image is in this image's history
-        history = image.history()
-        for layer in history:
-            if layer['Id'] == base_image_id:
-                # If found, add this image to the dependent images list
-                tags = image.tags
-                dependent_images.append(tags[0] if tags else image.id)
-                break
-
-    return dependent_images
-
-
-def list_images(client: docker.DockerClient):
+def list_images(client):
     """
-    List all images from the Docker client.
+    List all Singularity image files in the current directory and common Singularity locations.
+    
+    Args:
+        client: Not used (kept for API compatibility)
     """
-    # don't use this in multi-threaded context
-    return {tag for i in client.images.list(all=True) for tag in i.tags}
-
+    image_paths = set()
+    
+    # Common Singularity image extensions
+    extensions = {'.sif', '.simg'}
+    
+    # Search in common locations
+    search_paths = [
+        os.getcwd(),
+        os.path.expanduser('~/.singularity'),
+        '/usr/local/singularity'
+    ]
+    
+    for path in search_paths:
+        if os.path.exists(path):
+            for root, _, files in os.walk(path):
+                for file in files:
+                    if any(file.endswith(ext) for ext in extensions):
+                        image_paths.add(os.path.join(root, file))
+    
+    return image_paths
 
 def clean_images(
-        client: docker.DockerClient,
+        client,
         prior_images: set,
         cache_level: str,
         clean: bool
     ):
     """
-    Clean Docker images based on cache level and clean flag.
+    Clean Singularity images based on cache level and clean flag.
 
     Args:
-        client (docker.DockerClient): Docker client.
-        prior_images (set): Set of images that existed before the current run.
-        cache (str): Cache level to use.
-        clean (bool): Whether to clean; remove images that are higher in the cache hierarchy than the current
-            cache level. E.g. if cache_level is set to env, remove all previously built instances images. if
-            clean is false, previously built instances images will not be removed, but instance images built
-            in the current run will be removed.
+        client: Not used (kept for API compatibility)
+        prior_images (set): Set of image paths that existed before the current run
+        cache_level (str): Cache level to use
+        clean (bool): Whether to clean images that existed before this run
     """
     images = list_images(client)
     removed = 0
     print("Cleaning cached images...")
-    for image_name in images:
-        if should_remove(image_name, cache_level, clean, prior_images):
+    for image_path in images:
+        if should_remove(image_path, cache_level, clean, prior_images):
             try:
-                remove_image(client, image_name, "quiet")
+                remove_image(client, image_path, "quiet")
                 removed += 1
             except Exception as e:
-                print(f"Error removing image {image_name}: {e}")
+                print(f"Error removing image {image_path}: {e}")
                 continue
     print(f"Removed {removed} images.")
 
-
 def should_remove(
-        image_name: str,
+        image_path: str,
         cache_level: str,
         clean: bool,
         prior_images: set
@@ -306,9 +251,9 @@ def should_remove(
     """
     Determine if an image should be removed based on cache level and clean flag.
     """
-    existed_before = image_name in prior_images
-    if '/' in image_name:
-        image_name = image_name.split('/', 1)[-1]
+    existed_before = image_path in prior_images
+    image_name = os.path.basename(image_path)
+    
     if image_name.startswith("sweb.base"):
         if cache_level in {"none"} and (clean or not existed_before):
             return True

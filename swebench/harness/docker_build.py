@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import docker
-import docker.errors
 import logging
 import re
 import sys
+import subprocess
 import traceback
-
 from pathlib import Path
 
 from swebench.harness.constants import (
@@ -30,7 +28,6 @@ from swebench.harness.utils import run_threadpool
 
 ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
-
 class BuildImageError(Exception):
     def __init__(self, image_name, message, logger):
         super().__init__(message)
@@ -45,15 +42,8 @@ class BuildImageError(Exception):
             f"Check ({self.log_path}) for more information."
         )
 
-
 def setup_logger(instance_id: str, log_file: Path, mode="w", add_stdout: bool = False):
-    """
-    This logger is used for logging the build process of images and containers.
-    It writes logs to the log file.
-
-    If `add_stdout` is True, logs will also be sent to stdout, which can be used for
-    streaming ephemeral output from Modal containers.
-    """
+    """Logger setup remains the same as original"""
     log_file.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"{instance_id}.{log_file.name}")
     handler = logging.FileHandler(log_file, mode=mode, encoding=UTF8)
@@ -70,219 +60,135 @@ def setup_logger(instance_id: str, log_file: Path, mode="w", add_stdout: bool = 
         logger.addHandler(handler)
     return logger
 
-
 def close_logger(logger):
-    # To avoid too many open files
+    """Remains the same as original"""
     for handler in logger.handlers:
         handler.close()
         logger.removeHandler(handler)
 
-
 def build_image(
         image_name: str,
         setup_scripts: dict,
-        dockerfile: str,
+        dockerfile: str,  # Keep dockerfile parameter name but use as definition file
         platform: str,
-        client: docker.DockerClient,
+        client: None,  # Keep for compatibility but don't use
         build_dir: Path,
         nocache: bool = False
     ):
     """
-    Builds a docker image with the given name, setup scripts, dockerfile, and platform.
-
-    Args:
-        image_name (str): Name of the image to build
-        setup_scripts (dict): Dictionary of setup script names to setup script contents
-        dockerfile (str): Contents of the Dockerfile
-        platform (str): Platform to build the image for
-        client (docker.DockerClient): Docker client to use for building the image
-        build_dir (Path): Directory for the build context (will also contain logs, scripts, and artifacts)
-        nocache (bool): Whether to use the cache when building
+    Builds a Singularity image instead of Docker image.
     """
-    # Create a logger for the build process
     logger = setup_logger(image_name, build_dir / "build_image.log")
     logger.info(
-        f"Building image {image_name}\n"
-        f"Using dockerfile:\n{dockerfile}\n"
-        f"Adding ({len(setup_scripts)}) setup scripts to image build repo"
+        f"Building Singularity image {image_name}\n"
+        f"Using definition file:\n{dockerfile}\n"
+        f"Adding ({len(setup_scripts)}) setup scripts"
     )
 
-    for setup_script_name, setup_script in setup_scripts.items():
-        logger.info(f"[SETUP SCRIPT] {setup_script_name}:\n{setup_script}")
     try:
-        # Write the setup scripts to the build directory
+        # Write setup scripts
         for setup_script_name, setup_script in setup_scripts.items():
             setup_script_path = build_dir / setup_script_name
             with open(setup_script_path, "w") as f:
                 f.write(setup_script)
-            if setup_script_name not in dockerfile:
-                logger.warning(
-                    f"Setup script {setup_script_name} may not be used in Dockerfile"
-                )
 
-        # Write the dockerfile to the build directory
-        dockerfile_path = build_dir / "Dockerfile"
-        with open(dockerfile_path, "w") as f:
-            f.write(dockerfile)
+        # Write Singularity definition file (converted from Dockerfile)
+        def_file = convert_dockerfile_to_definition(dockerfile)
+        def_file_path = build_dir / "Singularity.def"
+        with open(def_file_path, "w") as f:
+            f.write(def_file)
 
-        # Build the image
-        logger.info(
-            f"Building docker image {image_name} in {build_dir} with platform {platform}"
-        )
-        response = client.api.build(
-            path=str(build_dir),
-            tag=image_name,
-            rm=True,
-            forcerm=True,
-            decode=True,
-            platform=platform,
-            nocache=nocache,
+        # Build image
+        sif_path = build_dir / f"{image_name.replace(':', '_')}.sif"
+        cmd = ["singularity", "build"]
+        if nocache:
+            cmd.append("--force")
+        cmd.extend(["--fakeroot", str(sif_path), str(def_file_path)])
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
         )
 
-        # Log the build process continuously
         buildlog = ""
-        for chunk in response:
-            if "stream" in chunk:
-                # Remove ANSI escape sequences from the log
-                chunk_stream = ansi_escape.sub("", chunk["stream"])
-                logger.info(chunk_stream.strip())
-                buildlog += chunk_stream
-            elif "errorDetail" in chunk:
-                # Decode error message, raise BuildError
-                logger.error(
-                    f"Error: {ansi_escape.sub('', chunk['errorDetail']['message'])}"
-                )
-                raise docker.errors.BuildError(
-                    chunk["errorDetail"]["message"], buildlog
-                )
+        while True:
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output:
+                clean_output = ansi_escape.sub("", output.strip())
+                logger.info(clean_output)
+                buildlog += clean_output
+
+        if process.returncode != 0:
+            error = process.stderr.read()
+            raise Exception(f"Build failed: {error}")
+
         logger.info("Image built successfully!")
-    except docker.errors.BuildError as e:
-        logger.error(f"docker.errors.BuildError during {image_name}: {e}")
-        raise BuildImageError(image_name, str(e), logger) from e
+        return sif_path
+
     except Exception as e:
         logger.error(f"Error building image {image_name}: {e}")
         raise BuildImageError(image_name, str(e), logger) from e
     finally:
-        close_logger(logger)  # functions that create loggers should close them
-
+        close_logger(logger)
 
 def build_base_images(
-        client: docker.DockerClient,
+        client: None,  # Keep for compatibility but don't use
         dataset: list,
         force_rebuild: bool = False
     ):
     """
-    Builds the base images required for the dataset if they do not already exist.
-
-    Args:
-        client (docker.DockerClient): Docker client to use for building the images
-        dataset (list): List of test specs or dataset to build images for
-        force_rebuild (bool): Whether to force rebuild the images even if they already exist
+    Builds base Singularity images.
     """
-    # Get the base images to build from the dataset
     test_specs = get_test_specs_from_dataset(dataset)
     base_images = {
         x.base_image_key: (x.base_dockerfile, x.platform) for x in test_specs
     }
 
-    # Build the base images
     for image_name, (dockerfile, platform) in base_images.items():
-        try:
-            # Check if the base image already exists
-            client.images.get(image_name)
-            if force_rebuild:
-                # Remove the base image if it exists and force rebuild is enabled
-                remove_image(client, image_name, "quiet")
-            else:
-                print(f"Base image {image_name} already exists, skipping build.")
-                continue
-        except docker.errors.ImageNotFound:
-            pass
-        # Build the base image (if it does not exist or force rebuild is enabled)
+        sif_path = BASE_IMAGE_BUILD_DIR / f"{image_name.replace(':', '_')}.sif"
+        
+        if sif_path.exists() and not force_rebuild:
+            print(f"Base image {sif_path} already exists, skipping build.")
+            continue
+
         print(f"Building base image ({image_name})")
         build_image(
             image_name=image_name,
             setup_scripts={},
             dockerfile=dockerfile,
             platform=platform,
-            client=client,
+            client=None,
             build_dir=BASE_IMAGE_BUILD_DIR / image_name.replace(":", "__"),
         )
     print("Base images built successfully.")
 
-
-def get_env_configs_to_build(
-        client: docker.DockerClient,
-        dataset: list,
-    ):
-    """
-    Returns a dictionary of image names to build scripts and dockerfiles for environment images.
-    Returns only the environment images that need to be built.
-
-    Args:
-        client (docker.DockerClient): Docker client to use for building the images
-        dataset (list): List of test specs or dataset to build images for
-    """
-    image_scripts = dict()
-    base_images = dict()
-    test_specs = get_test_specs_from_dataset(dataset)
-
-    for test_spec in test_specs:
-        # Check if the base image exists
-        try:
-            if test_spec.base_image_key not in base_images:
-                base_images[test_spec.base_image_key] = client.images.get(
-                    test_spec.base_image_key
-                )
-            base_image = base_images[test_spec.base_image_key]
-        except docker.errors.ImageNotFound:
-            raise Exception(
-                f"Base image {test_spec.base_image_key} not found for {test_spec.env_image_key}\n."
-                "Please build the base images first."
-            )
-
-        # Check if the environment image exists
-        image_exists = False
-        try:
-            env_image = client.images.get(test_spec.env_image_key)
-            image_exists = True
-        except docker.errors.ImageNotFound:
-            pass
-        if not image_exists:
-            # Add the environment image to the list of images to build
-            image_scripts[test_spec.env_image_key] = {
-                "setup_script": test_spec.setup_env_script,
-                "dockerfile": test_spec.env_dockerfile,
-                "platform": test_spec.platform,
-            }
-    return image_scripts
-
-
 def build_env_images(
-        client: docker.DockerClient,
+        client: None,  # Keep for compatibility but don't use
         dataset: list,
         force_rebuild: bool = False,
         max_workers: int = 4
     ):
     """
-    Builds the environment images required for the dataset if they do not already exist.
-
-    Args:
-        client (docker.DockerClient): Docker client to use for building the images
-        dataset (list): List of test specs or dataset to build images for
-        force_rebuild (bool): Whether to force rebuild the images even if they already exist
-        max_workers (int): Maximum number of workers to use for building images
+    Builds environment Singularity images.
     """
-    # Get the environment images to build from the dataset
     if force_rebuild:
         env_image_keys = {x.env_image_key for x in get_test_specs_from_dataset(dataset)}
         for key in env_image_keys:
-            remove_image(client, key, "quiet")
-    build_base_images(client, dataset, force_rebuild)
-    configs_to_build = get_env_configs_to_build(client, dataset)
+            sif_path = ENV_IMAGE_BUILD_DIR / f"{key.replace(':', '_')}.sif"
+            if sif_path.exists():
+                sif_path.unlink()
+
+    build_base_images(None, dataset, force_rebuild)
+    configs_to_build = get_env_configs_to_build(None, dataset)
+    
     if len(configs_to_build) == 0:
         print("No environment images need to be built.")
         return [], []
+
     print(f"Total environment images to build: {len(configs_to_build)}")
 
     args_list = list()
@@ -292,23 +198,49 @@ def build_env_images(
             {"setup_env.sh": config["setup_script"]},
             config["dockerfile"],
             config["platform"],
-            client,
+            None,
             ENV_IMAGE_BUILD_DIR / image_name.replace(":", "__"),
         ))
     
     successful, failed = run_threadpool(build_image, args_list, max_workers)
-    # Show how many images failed to build
     if len(failed) == 0:
         print("All environment images built successfully.")
     else:
         print(f"{len(failed)} environment images failed to build.")
 
-    # Return the list of (un)successfuly built images
     return successful, failed
 
+def get_env_configs_to_build(
+        client: None,  # Keep for compatibility but don't use
+        dataset: list,
+    ):
+    """
+    Gets configurations for environment images that need building.
+    """
+    image_scripts = dict()
+    test_specs = get_test_specs_from_dataset(dataset)
+
+    for test_spec in test_specs:
+        # Check if base image exists
+        base_sif = BASE_IMAGE_BUILD_DIR / f"{test_spec.base_image_key.replace(':', '_')}.sif"
+        if not base_sif.exists():
+            raise Exception(
+                f"Base image {test_spec.base_image_key} not found for {test_spec.env_image_key}\n"
+                "Please build the base images first."
+            )
+
+        # Check if env image exists
+        env_sif = ENV_IMAGE_BUILD_DIR / f"{test_spec.env_image_key.replace(':', '_')}.sif"
+        if not env_sif.exists():
+            image_scripts[test_spec.env_image_key] = {
+                "setup_script": test_spec.setup_env_script,
+                "dockerfile": test_spec.env_dockerfile,
+                "platform": test_spec.platform,
+            }
+    return image_scripts
 
 def build_instance_images(
-        client: docker.DockerClient,
+        client: None,  # Keep for compatibility but don't use
         dataset: list,
         force_rebuild: bool = False,
         max_workers: int = 4,
@@ -316,102 +248,77 @@ def build_instance_images(
         tag: str = None,
     ):
     """
-    Builds the instance images required for the dataset if they do not already exist.
-
-    Args:
-        dataset (list): List of test specs or dataset to build images for
-        client (docker.DockerClient): Docker client to use for building the images
-        force_rebuild (bool): Whether to force rebuild the images even if they already exist
-        max_workers (int): Maximum number of workers to use for building images
+    Builds instance Singularity images.
     """
-    # Build environment images (and base images as needed) first
     test_specs = list(map(lambda x: make_test_spec(x, namespace=namespace, instance_image_tag=tag), dataset))
     if force_rebuild:
         for spec in test_specs:
-            remove_image(client, spec.instance_image_key, "quiet")
-    _, env_failed = build_env_images(client, test_specs, force_rebuild, max_workers)
+            sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{spec.instance_image_key.replace(':', '_')}.sif"
+            if sif_path.exists():
+                sif_path.unlink()
+
+    _, env_failed = build_env_images(None, test_specs, force_rebuild, max_workers)
 
     if len(env_failed) > 0:
-        # Don't build images for instances that depend on failed-to-build env images
         dont_run_specs = [spec for spec in test_specs if spec.env_image_key in env_failed]
         test_specs = [spec for spec in test_specs if spec.env_image_key not in env_failed]
         print(f"Skipping {len(dont_run_specs)} instances - due to failed env image builds")
+
     print(f"Building instance images for {len(test_specs)} instances")
-    successful, failed = list(), list()
     
-    # `logger` is set to None b/c logger is created in build-instage_image
-    payloads = [(spec, client, None, False) for spec in test_specs]
-    # Build the instance images
+    payloads = [(spec, None, False) for spec in test_specs]
     successful, failed = run_threadpool(build_instance_image, payloads, max_workers)
-    # Show how many images failed to build
+
     if len(failed) == 0:
         print("All instance images built successfully.")
     else:
         print(f"{len(failed)} instance images failed to build.")
 
-    # Return the list of (un)successfuly built images
     return successful, failed
-
 
 def build_instance_image(
         test_spec: TestSpec,
-        client: docker.DockerClient,
+        client: None,  # Keep for compatibility but don't use
         logger: logging.Logger|None,
         nocache: bool,
     ):
     """
-    Builds the instance image for the given test spec if it does not already exist.
-
-    Args:
-        test_spec (TestSpec): Test spec to build the instance image for
-        client (docker.DockerClient): Docker client to use for building the image
-        logger (logging.Logger): Logger to use for logging the build process
-        nocache (bool): Whether to use the cache when building
+    Builds instance Singularity image.
     """
-    # Set up logging for the build process
     build_dir = INSTANCE_IMAGE_BUILD_DIR / test_spec.instance_image_key.replace(":", "__")
     new_logger = False
     if logger is None:
         new_logger = True
         logger = setup_logger(test_spec.instance_id, build_dir / "prepare_image.log")
 
-    # Get the image names and dockerfile for the instance image
     image_name = test_spec.instance_image_key
     env_image_name = test_spec.env_image_key
-    dockerfile = test_spec.instance_dockerfile
 
-    # Check that the env. image the instance image is based on exists
-    try:
-        env_image = client.images.get(env_image_name)
-    except docker.errors.ImageNotFound as e:
+    # Check that env image exists
+    env_sif = ENV_IMAGE_BUILD_DIR / f"{env_image_name.replace(':', '_')}.sif"
+    if not env_sif.exists():
         raise BuildImageError(
             test_spec.instance_id,
             f"Environment image {env_image_name} not found for {test_spec.instance_id}",
             logger,
-        ) from e
+        )
+
     logger.info(
         f"Environment image {env_image_name} found for {test_spec.instance_id}\n"
-        f"Building instance image {image_name} for {test_spec.instance_id}"
+        f"Building instance image {image_name}"
     )
 
-    # Check if the instance image already exists
-    image_exists = False
-    try:
-        client.images.get(image_name)
-        image_exists = True
-    except docker.errors.ImageNotFound:
-        pass
-
-    # Build the instance image
-    if not image_exists:
+    # Check if instance image exists
+    instance_sif = build_dir / f"{image_name.replace(':', '_')}.sif"
+    if not instance_sif.exists():
         build_image(
             image_name=image_name,
             setup_scripts={
                 "setup_repo.sh": test_spec.install_repo_script,
             },
-            dockerfile=dockerfile,
+            dockerfile=test_spec.instance_dockerfile,
             platform=test_spec.platform,
-            client=client,
+            client=None,
             build_dir=build_dir,
             nocache=nocache,
         )
@@ -421,63 +328,261 @@ def build_instance_image(
     if new_logger:
         close_logger(logger)
 
-
 def build_container(
         test_spec: TestSpec,
-        client: docker.DockerClient,
+        client: None,  # Keep for compatibility but don't use
         run_id: str,
         logger: logging.Logger,
         nocache: bool,
         force_rebuild: bool = False
     ):
     """
-    Builds the instance image for the given test spec and creates a container from the image.
-
-    Args:
-        test_spec (TestSpec): Test spec to build the instance image and container for
-        client (docker.DockerClient): Docker client for building image + creating the container
-        run_id (str): Run ID identifying process, used for the container name
-        logger (logging.Logger): Logger to use for logging the build process
-        nocache (bool): Whether to use the cache when building
-        force_rebuild (bool): Whether to force rebuild the image even if it already exists
+    Creates Singularity instance instead of Docker container.
     """
-    # Build corresponding instance image
     if force_rebuild:
-        remove_image(client, test_spec.instance_image_key, "quiet")
+        sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
+        if sif_path.exists():
+            sif_path.unlink()
+
     if not test_spec.is_remote_image:
-        build_instance_image(test_spec, client, logger, nocache)
+        build_instance_image(test_spec, None, logger, nocache)
     else:
+        # For remote images, pull using singularity
         try:
-            client.images.get(test_spec.instance_image_key)
-        except docker.errors.ImageNotFound:
-            try:
-                client.images.pull(test_spec.instance_image_key)
-            except docker.errors.NotFound as e:
-                raise BuildImageError(test_spec.instance_id, str(e), logger) from e
+            cmd = ["singularity", "pull", f"{test_spec.instance_image_key}.sif", f"docker://{test_spec.instance_image_key}"]
+            process = subprocess.run(cmd, capture_output=True, text=True)
+            if process.returncode != 0:
+                raise Exception(f"Failed to pull image: {process.stderr}")
+        except Exception as e:
+            raise BuildImageError(test_spec.instance_id, str(e), logger) from e
 
-    container = None
     try:
-        # Create the container
-        logger.info(f"Creating container for {test_spec.instance_id}...")
+        logger.info(f"Creating Singularity instance for {test_spec.instance_id}...")
+        
+        instance_name = test_spec.get_instance_container_name(run_id)
+        sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
+        
+        cmd = [
+            "singularity",
+            "instance",
+            "start",
+            str(sif_path),
+            instance_name
+        ]
 
-        # Define arguments for running the container
-        run_args = test_spec.docker_specs.get("run_args", {})
-        cap_add = run_args.get("cap_add", [])
+        process = subprocess.run(cmd, capture_output=True, text=True)
+        if process.returncode != 0:
+            raise Exception(f"Failed to start instance: {process.stderr}")
 
-        container = client.containers.create(
-            image=test_spec.instance_image_key,
-            name=test_spec.get_instance_container_name(run_id),
-            user=DOCKER_USER,
-            detach=True,
-            command="tail -f /dev/null",
-            platform=test_spec.platform,
-            cap_add=cap_add,
-        )
-        logger.info(f"Container for {test_spec.instance_id} created: {container.id}")
-        return container
+        logger.info(f"Instance {instance_name} created successfully")
+        return instance_name
+
     except Exception as e:
-        # If an error occurs, clean up the container and raise an exception
-        logger.error(f"Error creating container for {test_spec.instance_id}: {e}")
+        logger.error(f"Error creating instance for {test_spec.instance_id}: {e}")
         logger.info(traceback.format_exc())
-        cleanup_container(client, container, logger)
+        # Try to stop instance if it exists
+        try:
+            subprocess.run(["singularity", "instance", "stop", instance_name], capture_output=True)
+        except:
+            pass
         raise BuildImageError(test_spec.instance_id, str(e), logger) from e
+
+def parse_docker_command(line: str) -> tuple[str, str]:
+    """Helper function to parse Docker commands that might contain spaces in values"""
+    line = line.strip()
+    parts = line.split(None, 1)
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1]
+
+def convert_dockerfile_to_definition(dockerfile: str) -> str:
+    """
+    Converts a Dockerfile to a Singularity definition file with comprehensive support
+    for Docker directives and multi-stage builds.
+    
+    Args:
+        dockerfile (str): Original Dockerfile content
+        
+    Returns:
+        str: Singularity definition file content
+    """
+    lines = dockerfile.split('\n')
+    stages = []
+    current_stage = []
+    definition = []
+    
+    # First pass: separate multi-stage builds
+    for line in lines:
+        command, args = parse_docker_command(line)
+        if command == 'FROM':
+            if current_stage:
+                stages.append(current_stage)
+            current_stage = [line]
+        elif line.strip():
+            current_stage.append(line)
+    if current_stage:
+        stages.append(current_stage)
+    
+    # Use the last stage for the final image
+    if not stages:
+        return ""
+    
+    final_stage = stages[-1]
+    
+    # Process the final stage
+    workdir = "/"
+    env_vars = {}
+    labels = {}
+    setup_commands = []
+    files_section = []
+    post_section = []
+    env_section = []
+    apps_section = []
+    
+    for line in final_stage:
+        command, args = parse_docker_command(line)
+        
+        if command == 'FROM':
+            if 'AS' in args.upper():
+                args = args.split('AS')[0].strip()
+            if ' as ' in args.lower():
+                args = args.split(' as ')[0].strip()
+            definition.extend([
+                'Bootstrap: docker',
+                f'From: {args}',
+                ''
+            ])
+            
+        elif command == 'LABEL':
+            for label in args.split('='):
+                parts = label.split()
+                if len(parts) >= 2:
+                    key = parts[0].strip('" ')
+                    value = '='.join(parts[1:]).strip('" ')
+                    labels[key] = value
+                    
+        elif command == 'ENV':
+            if '=' in args:
+                key, value = args.split('=', 1)
+                env_vars[key.strip()] = value.strip().strip('"')
+            else:
+                parts = args.split()
+                if len(parts) >= 2:
+                    env_vars[parts[0]] = ' '.join(parts[1:]).strip('"')
+                    
+        elif command == 'WORKDIR':
+            workdir = args.strip('"')
+            post_section.append(f'    mkdir -p {workdir}')
+            post_section.append(f'    cd {workdir}')
+            
+        elif command == 'COPY' or command == 'ADD':
+            parts = args.split()
+            if '--from=' in parts[0]:
+                # Handle multi-stage copy
+                parts = parts[1:]
+            dest = parts[-1]
+            srcs = parts[:-1]
+            for src in srcs:
+                if not src.startswith('/'):
+                    src = f'{workdir}/{src}'
+                if not dest.startswith('/'):
+                    dest = f'{workdir}/{dest}'
+                files_section.append(f'    {src} {dest}')
+                
+        elif command == 'RUN':
+            if args.startswith('[') and args.endswith(']'):
+                # Handle JSON array format
+                try:
+                    import json
+                    cmd_parts = json.loads(args)
+                    args = ' '.join(cmd_parts)
+                except:
+                    pass
+            post_section.append(f'    {args}')
+            
+        elif command == 'USER':
+            post_section.append(f'    # Switching to user: {args}')
+            post_section.append(f'    su - {args}')
+            
+        elif command == 'EXPOSE':
+            # Add as a comment since Singularity handles ports differently
+            post_section.append(f'    # Original Docker exposed port: {args}')
+            
+        elif command == 'VOLUME':
+            # Add as a comment since Singularity handles volumes differently
+            post_section.append(f'    # Original Docker volume: {args}')
+            
+        elif command == 'ENTRYPOINT':
+            if args.startswith('['):
+                try:
+                    import json
+                    cmd_parts = json.loads(args)
+                    args = ' '.join(cmd_parts)
+                except:
+                    args = args.strip('[]').replace('"', '').replace(',', '')
+            apps_section.extend([
+                '%apprun main',
+                f'    {args} "$@"'
+            ])
+            
+        elif command == 'CMD':
+            if args.startswith('['):
+                try:
+                    import json
+                    cmd_parts = json.loads(args)
+                    args = ' '.join(cmd_parts)
+                except:
+                    args = args.strip('[]').replace('"', '').replace(',', '')
+            apps_section.extend([
+                '%apprun default',
+                f'    {args}'
+            ])
+    
+    # Build the definition file
+    if labels:
+        definition.append('%labels')
+        for key, value in labels.items():
+            definition.append(f'    {key} {value}')
+        definition.append('')
+        
+    if files_section:
+        definition.append('%files')
+        definition.extend(files_section)
+        definition.append('')
+        
+    if env_vars:
+        definition.append('%environment')
+        for key, value in env_vars.items():
+            definition.append(f'    export {key}="{value}"')
+        definition.extend(env_section)
+        definition.append('')
+        
+    if setup_commands:
+        definition.append('%setup')
+        definition.extend(setup_commands)
+        definition.append('')
+        
+    if post_section:
+        definition.append('%post')
+        definition.extend(post_section)
+        definition.append('')
+    
+    # Add runscript that defaults to the last CMD if present
+    if apps_section:
+        definition.extend(apps_section)
+        definition.append('')
+        definition.append('%runscript')
+        definition.append('    exec "$@"')
+    else:
+        definition.extend([
+            '%runscript',
+            '    exec "$@"',
+        ])
+    
+    definition.extend([
+        '',
+        '%startscript',
+        '    exec tail -f /dev/null'
+    ])
+    
+    return '\n'.join(definition)

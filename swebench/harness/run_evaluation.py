@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import docker
 import json
 import platform
 import traceback
+import spython.main
+from spython.instance import Instance
 
 if platform.system() == 'Linux':
     import resource
@@ -64,13 +65,12 @@ GIT_APPLY_CMDS = [
     "patch --batch --fuzz=5 -p1 -i",
 ]
 
-
 def run_instance(
         test_spec: TestSpec,
         pred: dict,
         rm_image: bool,
         force_rebuild: bool,
-        client: docker.DockerClient,
+        client: None,  # Keep for compatibility but don't use
         run_id: str,
         timeout: int | None = None,
         rewrite_reports: bool = False,
@@ -83,7 +83,7 @@ def run_instance(
         pred (dict): Prediction w/ model_name_or_path, model_patch, instance_id
         rm_image (bool): Whether to remove the image after running
         force_rebuild (bool): Whether to force rebuild the image
-        client (docker.DockerClient): Docker client
+        client: Not used (kept for API compatibility)
         run_id (str): Run ID
         timeout (int): Timeout for running tests
         rewrite_reports (bool): True if eval run is just to reformat existing report
@@ -118,10 +118,8 @@ def run_instance(
         image_build_link = log_dir / "image_build_dir"
         if not image_build_link.exists():
             try:
-                # link the image build dir in the log dir
                 image_build_link.symlink_to(build_dir.absolute(), target_is_directory=True)
             except:
-                # some error, idk why
                 pass
     
     # Set up logger
@@ -130,54 +128,62 @@ def run_instance(
     logger = setup_logger(instance_id, log_file)
 
     # Run the instance
-    container = None
+    instance = None
     try:
-        # Build + start instance container (instance image should already be built)
-        container = build_container(test_spec, client, run_id, logger, rm_image, force_rebuild)
-        container.start()
-        logger.info(f"Container for {instance_id} started: {container.id}")
+        # Build + start instance (instance image should already be built)
+        instance_name = build_container(test_spec, None, run_id, logger, rm_image, force_rebuild)
+        instance = spython.main.Instance(instance_name)
+        logger.info(f"Instance {instance_name} started")
 
-        # Copy model prediction as patch file to container
+        # Copy model prediction as patch file to instance
         patch_file = Path(log_dir / "patch.diff")
         patch_file.write_text(pred[KEY_PREDICTION] or "")
         logger.info(
-            f"Intermediate patch for {instance_id} written to {patch_file}, now applying to container..."
+            f"Intermediate patch for {instance_id} written to {patch_file}, now applying to instance..."
         )
-        copy_to_container(container, patch_file, PurePosixPath(DOCKER_PATCH))
+        copy_to_container(instance, patch_file, PurePosixPath(DOCKER_PATCH))
 
-        # Attempt to apply patch to container (TODO: FIX THIS)
+        # Attempt to apply patch to instance
         applied_patch = False
         for git_apply_cmd in GIT_APPLY_CMDS:
-            val = container.exec_run(f"{git_apply_cmd} {DOCKER_PATCH}", workdir=DOCKER_WORKDIR, user=DOCKER_USER)
-            if val.exit_code == 0:
-                logger.info(f"{APPLY_PATCH_PASS}:\n{val.output.decode(UTF8)}")
+            output, _ = spython.main.execute(
+                instance, 
+                f"{git_apply_cmd} {DOCKER_PATCH}".split(),
+                workdir=DOCKER_WORKDIR,
+                return_result=True
+            )
+            if _ == 0:  # exitcode
+                logger.info(f"{APPLY_PATCH_PASS}:\n{output}")
                 applied_patch = True
                 break
             else:
-                logger.info(f"Failed to apply patch to container: {git_apply_cmd}")
+                logger.info(f"Failed to apply patch to instance: {git_apply_cmd}")
         if not applied_patch:
-            logger.info(f"{APPLY_PATCH_FAIL}:\n{val.output.decode(UTF8)}")
+            logger.info(f"{APPLY_PATCH_FAIL}:\n{output}")
             raise EvaluationError(
                 instance_id,
-                f"{APPLY_PATCH_FAIL}:\n{val.output.decode(UTF8)}",
+                f"{APPLY_PATCH_FAIL}:\n{output}",
                 logger,
             )
 
         # Get git diff before running eval script
-        git_diff_output_before = (
-            container.exec_run("git -c core.fileMode=false diff", workdir=DOCKER_WORKDIR).output.decode(UTF8).strip()
-        )
+        git_diff_output_before = spython.main.execute(
+            instance,
+            "git -c core.fileMode=false diff".split(),
+            workdir=DOCKER_WORKDIR,
+            return_result=True
+        )[0].strip()
         logger.info(f"Git diff before:\n{git_diff_output_before}")
 
         eval_file = Path(log_dir / "eval.sh")
         eval_file.write_text(test_spec.eval_script)
         logger.info(
-            f"Eval script for {instance_id} written to {eval_file}; copying to container..."
+            f"Eval script for {instance_id} written to {eval_file}; copying to instance..."
         )
-        copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
+        copy_to_container(instance, eval_file, PurePosixPath("/eval.sh"))
 
         # Run eval script, write output to logs
-        test_output, timed_out, total_runtime = exec_run_with_timeout(container, "/bin/bash /eval.sh", timeout)
+        test_output, timed_out, total_runtime = exec_run_with_timeout(instance, "/bin/bash /eval.sh", timeout)
         test_output_path = log_dir / LOG_TEST_OUTPUT
         logger.info(f'Test runtime: {total_runtime:_.2f} seconds')
         with open(test_output_path, "w") as f:
@@ -192,9 +198,12 @@ def run_instance(
                 )
 
         # Get git diff after running eval script (ignore permission changes)
-        git_diff_output_after = (
-            container.exec_run("git -c core.fileMode=false diff", workdir=DOCKER_WORKDIR).output.decode(UTF8).strip()
-        )
+        git_diff_output_after = spython.main.execute(
+            instance,
+            "git -c core.fileMode=false diff".split(),
+            workdir=DOCKER_WORKDIR,
+            return_result=True
+        )[0].strip()
 
         # Check if git diff changed after running eval script
         logger.info(f"Git diff after:\n{git_diff_output_after}")
@@ -232,13 +241,13 @@ def run_instance(
                      f"Check ({logger.log_file}) for more information.")
         logger.error(error_msg)
     finally:
-        # Remove instance container + image, close logger
-        cleanup_container(client, container, logger)
+        # Remove instance + image, close logger
+        cleanup_container(None, instance, logger)
         if rm_image:
-            remove_image(client, test_spec.instance_image_key, logger)
+            sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
+            remove_image(None, str(sif_path), logger)
         close_logger(logger)
     return
-
 
 def run_instances(
         predictions: dict,
@@ -255,33 +264,24 @@ def run_instances(
     ):
     """
     Run all instances for the given predictions in parallel.
-
-    Args:
-        predictions (dict): Predictions dict generated by the model
-        instances (list): List of instances
-        cache_level (str): Cache level
-        clean (bool): Clean images above cache level
-        force_rebuild (bool): Force rebuild images
-        max_workers (int): Maximum number of workers
-        run_id (str): Run ID
-        timeout (int): Timeout for running tests
     """
-    client = docker.from_env()
     test_specs = list(map(
         lambda instance: make_test_spec(instance, namespace=namespace, instance_image_tag=instance_image_tag),
         instances
     ))
 
-    # print number of existing instance images
+    # Check for existing instance images
     instance_image_ids = {x.instance_image_key for x in test_specs}
-    existing_images = {
-        tag for i in client.images.list(all=True)
-        for tag in i.tags if tag in instance_image_ids
-    }
+    existing_images = set()
+    for image_id in instance_image_ids:
+        sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{image_id.replace(':', '_')}.sif"
+        if sif_path.exists():
+            existing_images.add(image_id)
+            
     if not force_rebuild and len(existing_images):
         print(f"Found {len(existing_images)} existing instance images. Will reuse them.")
 
-    # run instances in parallel
+    # Run instances in parallel
     payloads = []
     for test_spec in test_specs:
         payloads.append((
@@ -294,17 +294,15 @@ def run_instances(
                 existing_images,
             ),
             force_rebuild,
-            client,
+            None,  # No client needed for Singularity
             run_id,
             timeout,
             rewrite_reports,
         ))
     
-    # run instances in parallel
     print(f"Running {len(instances)} instances...")
     run_threadpool(run_instance, payloads, max_workers)
     print("All instances run.")
-
 
 def get_dataset_from_preds(
         dataset_name: str,
@@ -315,22 +313,18 @@ def get_dataset_from_preds(
         rewrite_reports: bool,
         exclude_completed: bool = True,
     ):
-    """
-    Return only instances that have predictions and are in the dataset.
-    If instance_ids is provided, only return instances with those IDs.
-    If exclude_completed is True, only return instances that have not been run yet.
-    """
-    # load dataset
+    """Return only instances that have predictions and are in the dataset."""
+    # Load dataset
     dataset = load_swebench_dataset(dataset_name, split)
     dataset_ids = {i[KEY_INSTANCE_ID] for i in dataset}
 
     if instance_ids:
-        # check that all instance IDs have predictions
+        # Check that all instance IDs have predictions
         missing_preds = set(instance_ids) - set(predictions.keys())
         if missing_preds:
             print(f"Warning: Missing predictions for {len(missing_preds)} instance IDs.")
     
-    # check that all prediction IDs are in the dataset
+    # Check that all prediction IDs are in the dataset
     prediction_ids = set(predictions.keys())
     if prediction_ids - dataset_ids:
         raise ValueError(
@@ -340,55 +334,8 @@ def get_dataset_from_preds(
             )
         )
     if instance_ids:
-        dataset = [i for i in dataset if i[KEY_INSTANCE_ID] in instance_ids]
-
-    if rewrite_reports:
-        # we only return instances that have existing test outputs
-        test_output_ids = set()
-        for instance in dataset:
-            if instance[KEY_INSTANCE_ID] not in predictions:
-                continue
-            prediction = predictions[instance[KEY_INSTANCE_ID]]
-            test_output_file = (
-                RUN_EVALUATION_LOG_DIR
-                / run_id
-                / prediction["model_name_or_path"].replace("/", "__")
-                / prediction[KEY_INSTANCE_ID]
-                / "test_output.txt"
-            )
-            if test_output_file.exists():
-                test_output_ids.add(instance[KEY_INSTANCE_ID])
-        dataset = [i for i in dataset if i[KEY_INSTANCE_ID] in prediction_ids and i[KEY_INSTANCE_ID] in test_output_ids]
-        return dataset
-    
-    # check which instance IDs have already been run
-    completed_ids = set()
-    for instance in dataset:
-        if instance[KEY_INSTANCE_ID] not in prediction_ids:
-            # skip instances without predictions
-            continue
-        prediction = predictions[instance[KEY_INSTANCE_ID]]
-        report_file = (
-            RUN_EVALUATION_LOG_DIR
-            / run_id
-            / prediction[KEY_MODEL].replace("/", "__")
-            / prediction[KEY_INSTANCE_ID]
-            / LOG_REPORT
-        )
-        if report_file.exists():
-            completed_ids.add(instance[KEY_INSTANCE_ID])
-
-    if completed_ids and exclude_completed:
-        # filter dataset to only instances that have not been run
-        print(f"{len(completed_ids)} instances already run, skipping...")
-        dataset = [i for i in dataset if i[KEY_INSTANCE_ID] not in completed_ids]
-
-    empty_patch_ids = {k for k, v in predictions.items() if v[KEY_PREDICTION] == "" or v[KEY_PREDICTION] is None}
-
-    # filter dataset to only instances with predictions
-    dataset = [i for i in dataset if i[KEY_INSTANCE_ID] in prediction_ids and i[KEY_INSTANCE_ID] not in empty_patch_ids]
+        dataset = [i for i in dataset if i[KEY_INSTANCE_ID] in prediction_ids and i[KEY_INSTANCE_ID] not in empty_patch_ids]
     return dataset
-
 
 def main(
         dataset_name: str,
@@ -418,7 +365,7 @@ def main(
         )
         return
 
-    # set open file limit
+    # Set open file limit
     assert len(run_id) > 0, "Run ID must be provided"
     if report_dir is not None:
         report_dir = Path(report_dir)
@@ -428,16 +375,16 @@ def main(
     if force_rebuild and namespace is not None:
         raise ValueError("Cannot force rebuild and use a namespace at the same time.")
 
-    # load predictions as map of instance_id to prediction
+    # Load predictions as map of instance_id to prediction
     predictions = get_predictions_from_file(predictions_path, dataset_name, split)
     predictions = {pred[KEY_INSTANCE_ID]: pred for pred in predictions}
 
-    # get dataset from predictions
+    # Get dataset from predictions
     dataset = get_dataset_from_preds(dataset_name, split, instance_ids, predictions, run_id, rewrite_reports)
     full_dataset = load_swebench_dataset(dataset_name, split, instance_ids)
 
     if modal:
-        # run instances on Modal
+        # Run instances on Modal
         if not dataset:
             print("No instances to run.")
         else:
@@ -445,19 +392,18 @@ def main(
             run_instances_modal(predictions, dataset, full_dataset, run_id, timeout)
         return
 
-    # run instances locally
+    # Run instances locally
     if platform.system() == 'Linux':
         resource.setrlimit(resource.RLIMIT_NOFILE, (open_file_limit, open_file_limit))
-    client = docker.from_env()
 
-    existing_images = list_images(client)
+    existing_images = list_images(None)
     print(f"Running {len(dataset)} unevaluated instances...")
     if not dataset:
         print("No instances to run.")
     else:
-        # build environment images + run instances
+        # Build environment images + run instances
         if namespace is None and not rewrite_reports:
-            build_env_images(client, dataset, force_rebuild, max_workers)
+            build_env_images(None, dataset, force_rebuild, max_workers)
         run_instances(
             predictions,
             dataset,
@@ -472,10 +418,9 @@ def main(
             rewrite_reports=rewrite_reports,
         )
 
-    # clean images + make final report
-    clean_images(client, existing_images, cache_level, clean)
-    return make_run_report(predictions, full_dataset, run_id, client)
-
+    # Clean images + make final report
+    clean_images(None, existing_images, cache_level, clean)
+    return make_run_report(predictions, full_dataset, run_id, None)
 
 if __name__ == "__main__":
     parser = ArgumentParser(
@@ -486,7 +431,7 @@ if __name__ == "__main__":
     # Common args
     parser.add_argument("--dataset_name", default="princeton-nlp/SWE-bench_Lite", type=str, help="Name of dataset or path to JSON file.")
     parser.add_argument("--split", type=str, default="test", help="Split of the dataset")
-    parser.add_argument( "--instance_ids", nargs="+", type=str, help="Instance IDs to run (space separated)")
+    parser.add_argument("--instance_ids", nargs="+", type=str, help="Instance IDs to run (space separated)")
     parser.add_argument("--predictions_path", type=str, help="Path to predictions file - if 'gold', uses gold predictions", required=True)
 
     # Local execution args
@@ -495,8 +440,6 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=int, default=1_800, help="Timeout (in seconds) for running tests for each instance")
     parser.add_argument("--force_rebuild", type=str2bool, default=False, help="Force rebuild of all images")
     parser.add_argument("--cache_level", type=str, choices=["none", "base", "env", "instance"], help="Cache level - remove images above this level", default="env")
-    # if clean is true then we remove all images that are above the cache level
-    # if clean is false, we only remove images above the cache level if they don't already exist
     parser.add_argument("--clean", type=str2bool, default=False, help="Clean images above cache level")
     parser.add_argument("--run_id", type=str, required=True, help="Run ID - identifies the run")
     parser.add_argument("--namespace", type=str, default="swebench", help="Namespace for images")
@@ -508,4 +451,4 @@ if __name__ == "__main__":
     parser.add_argument("--modal", type=str2bool, default=False, help="Run on Modal")
 
     args = parser.parse_args()
-    main(**vars(args))
+    main(**vars(args)) 
