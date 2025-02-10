@@ -52,9 +52,9 @@ KEY_MODEL = "model_name_or_path"
 KEY_PREDICTION = "model_patch"
 
 # Constants - Harness
-DOCKER_PATCH = "/scr/kanishkg/tmp/patch.diff"
+DOCKER_PATCH = "/tmp/patch.diff"
 DOCKER_USER = "root"
-DOCKER_WORKDIR = "/scr/kanishkg/testbed"
+DOCKER_WORKDIR = "/testbed"
 LOG_REPORT = "report.json"
 LOG_INSTANCE = "run_instance.log"
 LOG_TEST_OUTPUT = "test_output.txt"
