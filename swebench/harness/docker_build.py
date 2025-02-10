@@ -66,6 +66,75 @@ def close_logger(logger):
         handler.close()
         logger.removeHandler(handler)
 
+def build_image(
+        image_name: str,
+        setup_scripts: dict,
+        dockerfile: str,  # Keep dockerfile parameter name but use as definition file
+        platform: str,
+        client: None,  # Keep for compatibility but don't use
+        build_dir: Path,
+        nocache: bool = False
+    ):
+    """
+    Builds a Singularity image instead of Docker image.
+    """
+    logger = setup_logger(image_name, build_dir / "build_image.log")
+    logger.info(
+        f"Building Singularity image {image_name}\n"
+        f"Using definition file:\n{dockerfile}\n"
+        f"Adding ({len(setup_scripts)}) setup scripts"
+    )
+
+    try:
+        # Write setup scripts
+        for setup_script_name, setup_script in setup_scripts.items():
+            setup_script_path = build_dir / setup_script_name
+            with open(setup_script_path, "w") as f:
+                f.write(setup_script)
+
+        # Write Singularity definition file (converted from Dockerfile)
+        def_file = convert_dockerfile_to_definition(dockerfile)
+        def_file_path = build_dir / "Singularity.def"
+        with open(def_file_path, "w") as f:
+            f.write(def_file)
+
+        # Build image
+        sif_path = build_dir / f"{image_name.replace(':', '_')}.sif"
+        cmd = ["singularity", "build"]
+        if nocache:
+            cmd.append("--force")
+        cmd.extend(["--fakeroot", str(sif_path), str(def_file_path)])
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+
+        buildlog = ""
+        while True:
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output:
+                clean_output = ansi_escape.sub("", output.strip())
+                logger.info(clean_output)
+                buildlog += clean_output
+
+        if process.returncode != 0:
+            error = process.stderr.read()
+            raise Exception(f"Build failed: {error}")
+
+        logger.info("Image built successfully!")
+        return sif_path
+
+    except Exception as e:
+        logger.error(f"Error building image {image_name}: {e}")
+        raise BuildImageError(image_name, str(e), logger) from e
+    finally:
+        close_logger(logger)
+
 def build_base_images(
         client: None,  # Keep for compatibility but don't use
         dataset: list,
@@ -208,18 +277,17 @@ def build_instance_images(
     return successful, failed
 
 def build_instance_image(
-    test_spec: TestSpec,
-    client: None,  # Keep for compatibility but don't use
-    logger: logging.Logger|None,
-    nocache: bool,
-):
+        test_spec: TestSpec,
+        client: None,  # Keep for compatibility but don't use
+        logger: logging.Logger|None,
+        nocache: bool,
+    ):
     """
-    Builds instance Singularity image with proper directory creation.
+    Builds instance Singularity image.
     """
-    # Ensure the instance build directory exists
     build_dir = INSTANCE_IMAGE_BUILD_DIR / test_spec.instance_image_key.replace(":", "__")
     build_dir.mkdir(parents=True, exist_ok=True)
-    
+
     new_logger = False
     if logger is None:
         new_logger = True
@@ -228,9 +296,6 @@ def build_instance_image(
     image_name = test_spec.instance_image_key
     env_image_name = test_spec.env_image_key
 
-    # Ensure env image directory exists
-    ENV_IMAGE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    
     # Check that env image exists
     env_sif = ENV_IMAGE_BUILD_DIR / f"{env_image_name.replace(':', '_')}.sif"
     if not env_sif.exists():
@@ -266,19 +331,16 @@ def build_instance_image(
         close_logger(logger)
 
 def build_container(
-    test_spec: TestSpec,
-    client: None,  # Keep for compatibility but don't use
-    run_id: str,
-    logger: logging.Logger,
-    nocache: bool,
-    force_rebuild: bool = False
-):
+        test_spec: TestSpec,
+        client: None,  # Keep for compatibility but don't use
+        run_id: str,
+        logger: logging.Logger,
+        nocache: bool,
+        force_rebuild: bool = False
+    ):
     """
-    Creates Singularity instance with proper directory creation.
+    Creates Singularity instance instead of Docker container.
     """
-    # Ensure instance build directory exists
-    INSTANCE_IMAGE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    
     if force_rebuild:
         sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
         if sif_path.exists():
@@ -289,8 +351,7 @@ def build_container(
     else:
         # For remote images, pull using singularity
         try:
-            pull_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
-            cmd = ["singularity", "pull", str(pull_path), f"docker://{test_spec.instance_image_key}"]
+            cmd = ["singularity", "pull", f"{test_spec.instance_image_key}.sif", f"docker://{test_spec.instance_image_key}"]
             process = subprocess.run(cmd, capture_output=True, text=True)
             if process.returncode != 0:
                 raise Exception(f"Failed to pull image: {process.stderr}")
@@ -302,11 +363,6 @@ def build_container(
         
         instance_name = test_spec.get_instance_container_name(run_id)
         sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
-        
-        if not sif_path.exists():
-            raise Exception(f"SIF file not found at {sif_path}")
-            
-        logger.info(f"Using SIF file at: {sif_path}")
         
         cmd = [
             "singularity",
@@ -332,82 +388,6 @@ def build_container(
         except:
             pass
         raise BuildImageError(test_spec.instance_id, str(e), logger) from e
-
-def build_image(
-    image_name: str,
-    setup_scripts: dict,
-    dockerfile: str,
-    platform: str,
-    client: None,
-    build_dir: Path,
-    nocache: bool = False
-):
-    """
-    Builds a Singularity image with proper directory creation.
-    """
-    # Ensure build directory exists
-    build_dir.mkdir(parents=True, exist_ok=True)
-    
-    logger = setup_logger(image_name, build_dir / "build_image.log")
-    logger.info(
-        f"Building Singularity image {image_name}\n"
-        f"Using definition file:\n{dockerfile}\n"
-        f"Adding ({len(setup_scripts)}) setup scripts"
-    )
-
-    try:
-        # Write setup scripts
-        for setup_script_name, setup_script in setup_scripts.items():
-            setup_script_path = build_dir / setup_script_name
-            with open(setup_script_path, "w") as f:
-                f.write(setup_script)
-
-        # Write Singularity definition file
-        def_file = convert_dockerfile_to_definition(dockerfile)
-        def_file_path = build_dir / "Singularity.def"
-        with open(def_file_path, "w") as f:
-            f.write(def_file)
-
-        # Build image
-        sif_path = build_dir / f"{image_name.replace(':', '_')}.sif"
-        cmd = ["singularity", "build"]
-        if nocache:
-            cmd.append("--force")
-        cmd.extend(["--fakeroot", str(sif_path), str(def_file_path)])
-        
-        logger.info(f"Running build command: {' '.join(cmd)}")
-        logger.info(f"Building to SIF path: {sif_path}")
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True
-        )
-
-        buildlog = ""
-        while True:
-            output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
-                break
-            if output:
-                clean_output = ansi_escape.sub("", output.strip())
-                logger.info(clean_output)
-                buildlog += clean_output
-
-        if process.returncode != 0:
-            error = process.stderr.read()
-            raise Exception(f"Build failed: {error}")
-
-        logger.info("Image built successfully!")
-        return sif_path
-
-    except Exception as e:
-        logger.error(f"Error building image {image_name}: {e}")
-        raise BuildImageError(image_name, str(e), logger) from e
-    finally:
-        close_logger(logger)
-
 
 def parse_docker_command(line: str) -> tuple[str, str]:
     """Helper function to parse Docker commands that might contain spaces in values"""
