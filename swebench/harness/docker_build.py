@@ -362,7 +362,8 @@ def build_container(
             # move sif to the right sif_path
             sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
             sif_path.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["mv", f"{test_spec.instance_image_key}.sif", sif_path], check=True)
+            subprocess.run(["mv", f"{test_spec.instance_image_key}.sif", str(sif_path)], check=True)
+
         except Exception as e:
             raise BuildImageError(test_spec.instance_id, str(e), logger) from e
         print(f"Image {test_spec.instance_image_key} pulled successfully.")
