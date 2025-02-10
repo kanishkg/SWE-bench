@@ -16,38 +16,59 @@ from spython.instance import Instance
 HEREDOC_DELIMITER = "EOF_1399519320"  # different from dataset HEREDOC_DELIMITERs!
 
 
+import os
+import subprocess
+from pathlib import Path
+from spython.instance import Instance  # Ensure Instance is imported
+
 def copy_to_container(instance: Instance, src: Path, dst: Path):
     """
-    Copy a file from local to a Singularity container instance.
+    Copy a file from the host to a running Apptainer (Singularity) container instance.
 
     Args:
-        instance (Instance): Singularity container instance to copy to.
-        src (Path): Source file path.
-        dst (Path): Destination file path in the container.
+        instance (Instance): Running container instance.
+        src (Path): Local source file path.
+        dst (Path): Destination file path inside the container.
     """
-    # Check if destination path is valid
+    # Check if destination directory is valid
     if os.path.dirname(str(dst)) == "":
         raise ValueError(f"Destination path parent directory cannot be empty! dst: {dst}")
 
-    # Create the destination directory inside the running instance.
-    # This uses the singularity CLI to run a command inside the instance.
+    # Create the destination directory inside the container.
     subprocess.run([
-        'singularity', 'exec', f'instance://{instance.name}', 
+        'apptainer', 'exec', f'instance://{instance.name}', 
         'mkdir', '-p', str(dst.parent)
     ], check=True)
 
-    # Copy the file into the instance using Singularity's copy command.
+    # Read the contents of the source file.
+    with src.open('rb') as f:
+        file_data = f.read()
+
+    # Use 'tee' inside the container to write the file.
     subprocess.run([
-        'singularity', 'copy', str(src), f"{instance.name}:{dst}"
-    ], check=True)
+        'apptainer', 'exec', f'instance://{instance.name}', 
+        'tee', str(dst)
+    ], input=file_data, check=True)
 
 def write_to_container(instance: Instance, data: str, dst: Path):
     """
-    Write a string to a file in a Singularity container
+    Write a string to a file in an Apptainer (Singularity) container instance using a heredoc.
+    
+    Args:
+        instance (Instance): Running container instance.
+        data (str): The string data to write.
+        dst (Path): Destination file path in the container.
     """
-    # Use echo with heredoc via shell execution
+    HEREDOC_DELIMITER = "EOF"
+    # Build the heredoc command.
     command = f"cat <<'{HEREDOC_DELIMITER}' > {dst}\n{data}\n{HEREDOC_DELIMITER}"
-    spython.main.execute(instance, ['sh', '-c', command])
+    subprocess.run(
+        [
+            'apptainer', 'exec', f'instance://{instance.name}', 
+            'sh', '-c', command
+        ],
+        check=True
+    )
 
 def remove_image(client, image_path: str, logger=None):
     """
