@@ -15,26 +15,31 @@ from spython.instance import Instance
 
 HEREDOC_DELIMITER = "EOF_1399519320"  # different from dataset HEREDOC_DELIMITERs!
 
+
 def copy_to_container(instance: Instance, src: Path, dst: Path):
     """
-    Copy a file from local to a Singularity container instance
+    Copy a file from local to a Singularity container instance.
 
     Args:
-        instance (Instance): Singularity container instance to copy to
-        src (Path): Source file path
-        dst (Path): Destination file path in the container
+        instance (Instance): Singularity container instance to copy to.
+        src (Path): Source file path.
+        dst (Path): Destination file path in the container.
     """
     # Check if destination path is valid
-    if os.path.dirname(dst) == "":
-        raise ValueError(
-            f"Destination path parent directory cannot be empty!, dst: {dst}"
-        )
+    if os.path.dirname(str(dst)) == "":
+        raise ValueError(f"Destination path parent directory cannot be empty! dst: {dst}")
 
-    # Make directory if necessary
-    execute(instance, ['mkdir', '-p', str(dst.parent)])
-    
-    # Copy file directly using Singularity's copy command
-    subprocess.run(['singularity', 'copy', str(src), f"{instance.name}:{dst}"], check=True)
+    # Create the destination directory inside the running instance.
+    # This uses the singularity CLI to run a command inside the instance.
+    subprocess.run([
+        'singularity', 'exec', f'instance://{instance.name}', 
+        'mkdir', '-p', str(dst.parent)
+    ], check=True)
+
+    # Copy the file into the instance using Singularity's copy command.
+    subprocess.run([
+        'singularity', 'copy', str(src), f"{instance.name}:{dst}"
+    ], check=True)
 
 def write_to_container(instance: Instance, data: str, dst: Path):
     """
