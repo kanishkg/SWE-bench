@@ -359,6 +359,10 @@ def build_container(
             process = subprocess.run(cmd, capture_output=True, text=True)
             if process.returncode != 0:
                 raise Exception(f"Failed to pull image: {process.stderr}")
+            # move sif to the right sif_path
+            sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
+            sif_path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["mv", f"{test_spec.instance_image_key}.sif", sif_path], check=True)
         except Exception as e:
             raise BuildImageError(test_spec.instance_id, str(e), logger) from e
         print(f"Image {test_spec.instance_image_key} pulled successfully.")
