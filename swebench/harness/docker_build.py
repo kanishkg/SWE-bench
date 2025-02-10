@@ -285,8 +285,10 @@ def build_instance_image(
     """
     Builds instance Singularity image.
     """
+    print(f"Building instance image for {test_spec.instance_id}...")
     build_dir = INSTANCE_IMAGE_BUILD_DIR / test_spec.instance_image_key.replace(":", "__")
     build_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Build directory: {build_dir}")
 
     new_logger = False
     if logger is None:
@@ -347,9 +349,11 @@ def build_container(
             sif_path.unlink()
 
     if not test_spec.is_remote_image:
+        print(f"Building instance image for {test_spec.instance_id}...")
         build_instance_image(test_spec, None, logger, nocache)
     else:
         # For remote images, pull using singularity
+        print(f"Pulling image {test_spec.instance_image_key}...")
         try:
             cmd = ["singularity", "pull", f"{test_spec.instance_image_key}.sif", f"docker://{test_spec.instance_image_key}"]
             process = subprocess.run(cmd, capture_output=True, text=True)

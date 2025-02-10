@@ -92,6 +92,7 @@ def run_instance(
     instance_id = test_spec.instance_id
     model_name_or_path = pred.get(KEY_MODEL, "None").replace("/", "__")
     log_dir = RUN_EVALUATION_LOG_DIR / run_id / model_name_or_path / instance_id
+    logger.info(f"Using log directory: {log_dir}")
 
     # Set up report file
     report_path = log_dir / LOG_REPORT
@@ -131,7 +132,8 @@ def run_instance(
     instance = None
     try:
         # Build + start instance (instance image should already be built)
-        instance_name = build_container(test_spec, None, run_id, logger, rm_image, force_rebuild)
+        logger.info(f"Starting instance for {instance_id}...")
+        instance_name = build_container(test_spec, None, run_id, logger, rm_image, force_rebuild=True)
         instance = spython.main.Instance(instance_name)
         logger.info(f"Instance {instance_name} started")
 
