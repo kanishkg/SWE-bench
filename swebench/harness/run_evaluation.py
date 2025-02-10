@@ -189,12 +189,6 @@ def run_instance(
             check=True
         )
         git_diff_output_before = result.stdout.strip()
-        git_diff_output_before = spython.main.execute(
-            instance,
-            "git -c core.fileMode=false diff".split(),
-            workdir=DOCKER_WORKDIR,
-            return_result=True
-        )[0].strip()
         logger.info(f"Git diff before:\n{git_diff_output_before}")
 
         print(f"Copying eval script to instance...")
@@ -222,12 +216,15 @@ def run_instance(
                 )
 
         # Get git diff after running eval script (ignore permission changes)
-        git_diff_output_after = spython.main.execute(
-            instance,
-            "git -c core.fileMode=false diff".split(),
-            workdir=DOCKER_WORKDIR,
-            return_result=True
-        )[0].strip()
+        command = f"cd {DOCKER_WORKDIR} && git -c core.fileMode=false diff"
+        result = subprocess.run(
+            ['apptainer', 'exec', f'instance://{instance.name}', 'sh', '-c', command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        git_diff_output_after = result.stdout.strip()
 
         # Check if git diff changed after running eval script
         logger.info(f"Git diff after:\n{git_diff_output_after}")
