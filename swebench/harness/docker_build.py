@@ -385,8 +385,10 @@ def build_container(
 
         process = subprocess.run(cmd, capture_output=True, text=True)
         if process.returncode != 0:
+            print(f"Failed to start instance: {process.stderr}")
             raise Exception(f"Failed to start instance: {process.stderr}")
 
+        print(f"Instance {instance_name} created successfully")
         logger.info(f"Instance {instance_name} created successfully")
         return instance_name
 
