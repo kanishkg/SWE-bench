@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import platform
 import traceback
+import subprocess
 import spython.main
 
 from spython.main import Client
@@ -179,6 +180,15 @@ def run_instance(
 
         print(f"Patch applied to instance, getting git diff...")
         # Get git diff before running eval script
+        command = f"cd {DOCKER_WORKDIR} && git -c core.fileMode=false diff"
+        result = subprocess.run(
+            ['apptainer', 'exec', f'instance://{instance.name}', 'sh', '-c', command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        git_diff_output_before = result.stdout.strip()
         git_diff_output_before = spython.main.execute(
             instance,
             "git -c core.fileMode=false diff".split(),
