@@ -361,12 +361,15 @@ def build_container(
                 raise Exception(f"Failed to pull image: {process.stderr}")
         except Exception as e:
             raise BuildImageError(test_spec.instance_id, str(e), logger) from e
+        print(f"Image {test_spec.instance_image_key} pulled successfully.")
 
     try:
+        print(f"Creating Singularity instance for {test_spec.instance_id}...")
         logger.info(f"Creating Singularity instance for {test_spec.instance_id}...")
         
         instance_name = test_spec.get_instance_container_name(run_id)
         sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
+        print(f"running: {sif_path}")
         
         cmd = [
             "singularity",
