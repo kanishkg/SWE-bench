@@ -148,8 +148,10 @@ def run_instance(
         logger.info(
             f"Intermediate patch for {instance_id} written to {patch_file}, now applying to instance..."
         )
+        print(f"Copying patch file to instance...")
         copy_to_container(instance, patch_file, PurePosixPath(DOCKER_PATCH))
 
+        print(f"Applying patch to instance...")
         # Attempt to apply patch to instance
         applied_patch = False
         for git_apply_cmd in GIT_APPLY_CMDS:
@@ -165,7 +167,9 @@ def run_instance(
                 break
             else:
                 logger.info(f"Failed to apply patch to instance: {git_apply_cmd}")
+
         if not applied_patch:
+            print(f"Failed to apply patch to instance.")
             logger.info(f"{APPLY_PATCH_FAIL}:\n{output}")
             raise EvaluationError(
                 instance_id,
@@ -173,6 +177,7 @@ def run_instance(
                 logger,
             )
 
+        print(f"Patch applied to instance, getting git diff...")
         # Get git diff before running eval script
         git_diff_output_before = spython.main.execute(
             instance,
@@ -182,6 +187,7 @@ def run_instance(
         )[0].strip()
         logger.info(f"Git diff before:\n{git_diff_output_before}")
 
+        print(f"Copying eval script to instance...")
         eval_file = Path(log_dir / "eval.sh")
         eval_file.write_text(test_spec.eval_script)
         logger.info(
@@ -189,6 +195,7 @@ def run_instance(
         )
         copy_to_container(instance, eval_file, PurePosixPath("/eval.sh"))
 
+        print(f"Running eval script on instance...")
         # Run eval script, write output to logs
         test_output, timed_out, total_runtime = exec_run_with_timeout(instance, "/bin/bash /eval.sh", timeout)
         test_output_path = log_dir / LOG_TEST_OUTPUT
