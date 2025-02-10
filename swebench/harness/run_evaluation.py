@@ -134,6 +134,7 @@ def run_instance(
     try:
         # Build + start instance (instance image should already be built)
         print(f"Running instance {instance_id}...")
+        sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
         instance_name = build_container(test_spec, None, run_id, logger, rm_image, force_rebuild=True)
         # instance = spython.main.Instance(instance_name)
         instance = Client.instance.start(str(sif_path), name=instance_name)
