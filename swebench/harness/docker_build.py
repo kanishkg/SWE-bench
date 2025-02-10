@@ -286,6 +286,8 @@ def build_instance_image(
     Builds instance Singularity image.
     """
     build_dir = INSTANCE_IMAGE_BUILD_DIR / test_spec.instance_image_key.replace(":", "__")
+    build_dir.mkdir(parents=True, exist_ok=True)
+
     new_logger = False
     if logger is None:
         new_logger = True
