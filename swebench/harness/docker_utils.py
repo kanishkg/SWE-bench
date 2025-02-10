@@ -9,7 +9,8 @@ import traceback
 from pathlib import Path
 import subprocess
 import spython.main
-from spython.main import Client
+from spython.main.execute import execute
+
 from spython.instance import Instance
 
 HEREDOC_DELIMITER = "EOF_1399519320"  # different from dataset HEREDOC_DELIMITERs!
@@ -30,7 +31,7 @@ def copy_to_container(instance: Instance, src: Path, dst: Path):
         )
 
     # Make directory if necessary
-    spython.main.execute(instance, ['mkdir', '-p', str(dst.parent)])
+    execute(instance, ['mkdir', '-p', str(dst.parent)])
     
     # Copy file directly using Singularity's copy command
     subprocess.run(['singularity', 'copy', str(src), f"{instance.name}:{dst}"], check=True)
