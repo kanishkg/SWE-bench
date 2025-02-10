@@ -156,12 +156,16 @@ def run_instance(
         # Attempt to apply patch to instance
         applied_patch = False
         for git_apply_cmd in GIT_APPLY_CMDS:
-            output, exit_code = spython.main.execute(
-                instance, 
-                f"{git_apply_cmd} {DOCKER_PATCH}".split(),
-                workdir=DOCKER_WORKDIR,
-                return_result=True
+            # Construct the command to run inside the container
+            command = f"cd {DOCKER_WORKDIR} && {git_apply_cmd} {DOCKER_PATCH}"
+            result = subprocess.run(
+                ['apptainer', 'exec', f'instance://{instance.name}', 'sh', '-c', command],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
+            output = result.stdout
+            exit_code = result.returncode
             if exit_code == 0:
                 logger.info(f"{APPLY_PATCH_PASS}:\n{output}")
                 applied_patch = True
