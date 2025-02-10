@@ -358,11 +358,16 @@ def build_container(
             cmd = ["singularity", "pull", f"{test_spec.instance_image_key}.sif", f"docker://{test_spec.instance_image_key}"]
             process = subprocess.run(cmd, capture_output=True, text=True)
             if process.returncode != 0:
+                print(f"Failed to pull image: {process.stderr}")
                 raise Exception(f"Failed to pull image: {process.stderr}")
+            
+            print("pulled image")
             # move sif to the right sif_path
+            print(f"Moving image to {INSTANCE_IMAGE_BUILD_DIR}")
             sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
             sif_path.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["mv", f"{test_spec.instance_image_key}.sif", str(sif_path)], check=True)
+            print(f"Image moved to {sif_path}")
 
         except Exception as e:
             raise BuildImageError(test_spec.instance_id, str(e), logger) from e
