@@ -397,8 +397,7 @@ def parse_docker_command(line: str) -> tuple[str, str]:
 
 def convert_dockerfile_to_definition(dockerfile: str) -> str:
     """
-    Converts a Dockerfile to a Singularity definition file with comprehensive support
-    for Docker directives and multi-stage builds.
+    Converts a Dockerfile to a Singularity definition file using spython.
     
     Args:
         dockerfile (str): Original Dockerfile content
@@ -406,183 +405,21 @@ def convert_dockerfile_to_definition(dockerfile: str) -> str:
     Returns:
         str: Singularity definition file content
     """
-    lines = dockerfile.split('\n')
-    stages = []
-    current_stage = []
-    definition = []
-    
-    # First pass: separate multi-stage builds
-    for line in lines:
-        command, args = parse_docker_command(line)
-        if command == 'FROM':
-            if current_stage:
-                stages.append(current_stage)
-            current_stage = [line]
-        elif line.strip():
-            current_stage.append(line)
-    if current_stage:
-        stages.append(current_stage)
-    
-    # Use the last stage for the final image
-    if not stages:
-        return ""
-    
-    final_stage = stages[-1]
-    
-    # Process the final stage
-    workdir = "/"
-    env_vars = {}
-    labels = {}
-    setup_commands = []
-    files_section = []
-    post_section = []
-    env_section = []
-    apps_section = []
-    
-    for line in final_stage:
-        command, args = parse_docker_command(line)
+    # Create temporary dockerfile to parse
+    dockerfile_path = Path("temp_dockerfile")
+    try:
+        dockerfile_path.write_text(dockerfile)
         
-        if command == 'FROM':
-            if 'AS' in args.upper():
-                args = args.split('AS')[0].strip()
-            if ' as ' in args.lower():
-                args = args.split(' as ')[0].strip()
-            definition.extend([
-                'Bootstrap: docker',
-                f'From: {args}',
-                ''
-            ])
-            
-        elif command == 'LABEL':
-            for label in args.split('='):
-                parts = label.split()
-                if len(parts) >= 2:
-                    key = parts[0].strip('" ')
-                    value = '='.join(parts[1:]).strip('" ')
-                    labels[key] = value
-                    
-        elif command == 'ENV':
-            if '=' in args:
-                key, value = args.split('=', 1)
-                env_vars[key.strip()] = value.strip().strip('"')
-            else:
-                parts = args.split()
-                if len(parts) >= 2:
-                    env_vars[parts[0]] = ' '.join(parts[1:]).strip('"')
-                    
-        elif command == 'WORKDIR':
-            workdir = args.strip('"')
-            post_section.append(f'    mkdir -p {workdir}')
-            post_section.append(f'    cd {workdir}')
-            
-        elif command == 'COPY' or command == 'ADD':
-            parts = args.split()
-            if '--from=' in parts[0]:
-                # Handle multi-stage copy
-                parts = parts[1:]
-            dest = parts[-1]
-            srcs = parts[:-1]
-            for src in srcs:
-                if not src.startswith('/'):
-                    src = f'{workdir}/{src}'
-                if not dest.startswith('/'):
-                    dest = f'{workdir}/{dest}'
-                files_section.append(f'    {src} {dest}')
-                
-        elif command == 'RUN':
-            if args.startswith('[') and args.endswith(']'):
-                # Handle JSON array format
-                try:
-                    import json
-                    cmd_parts = json.loads(args)
-                    args = ' '.join(cmd_parts)
-                except:
-                    pass
-            post_section.append(f'    {args}')
-            
-        elif command == 'USER':
-            post_section.append(f'    # Switching to user: {args}')
-            post_section.append(f'    su - {args}')
-            
-        elif command == 'EXPOSE':
-            # Add as a comment since Singularity handles ports differently
-            post_section.append(f'    # Original Docker exposed port: {args}')
-            
-        elif command == 'VOLUME':
-            # Add as a comment since Singularity handles volumes differently
-            post_section.append(f'    # Original Docker volume: {args}')
-            
-        elif command == 'ENTRYPOINT':
-            if args.startswith('['):
-                try:
-                    import json
-                    cmd_parts = json.loads(args)
-                    args = ' '.join(cmd_parts)
-                except:
-                    args = args.strip('[]').replace('"', '').replace(',', '')
-            apps_section.extend([
-                '%apprun main',
-                f'    {args} "$@"'
-            ])
-            
-        elif command == 'CMD':
-            if args.startswith('['):
-                try:
-                    import json
-                    cmd_parts = json.loads(args)
-                    args = ' '.join(cmd_parts)
-                except:
-                    args = args.strip('[]').replace('"', '').replace(',', '')
-            apps_section.extend([
-                '%apprun default',
-                f'    {args}'
-            ])
-    
-    # Build the definition file
-    if labels:
-        definition.append('%labels')
-        for key, value in labels.items():
-            definition.append(f'    {key} {value}')
-        definition.append('')
+        # Parse dockerfile using spython
+        recipe = DockerRecipe(dockerfile_path)
+        singularity_def = recipe.convert()
         
-    if files_section:
-        definition.append('%files')
-        definition.extend(files_section)
-        definition.append('')
+        # Add startscript section which wasn't in original spython conversion
+        if not '%startscript' in singularity_def:
+            singularity_def += '\n\n%startscript\n    exec tail -f /dev/null'
+            
+        return singularity_def
         
-    if env_vars:
-        definition.append('%environment')
-        for key, value in env_vars.items():
-            definition.append(f'    export {key}="{value}"')
-        definition.extend(env_section)
-        definition.append('')
-        
-    if setup_commands:
-        definition.append('%setup')
-        definition.extend(setup_commands)
-        definition.append('')
-        
-    if post_section:
-        definition.append('%post')
-        definition.extend(post_section)
-        definition.append('')
-    
-    # Add runscript that defaults to the last CMD if present
-    if apps_section:
-        definition.extend(apps_section)
-        definition.append('')
-        definition.append('%runscript')
-        definition.append('    exec "$@"')
-    else:
-        definition.extend([
-            '%runscript',
-            '    exec "$@"',
-        ])
-    
-    definition.extend([
-        '',
-        '%startscript',
-        '    exec tail -f /dev/null'
-    ])
-    
-    return '\n'.join(definition)
+    finally:
+        if dockerfile_path.exists():
+            dockerfile_path.unlink()
