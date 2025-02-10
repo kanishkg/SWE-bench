@@ -9,6 +9,7 @@ import traceback
 from pathlib import Path
 import subprocess
 import spython.main
+from spython.main import Client
 from spython.instance import Instance
 
 HEREDOC_DELIMITER = "EOF_1399519320"  # different from dataset HEREDOC_DELIMITERs!

@@ -4,6 +4,7 @@ import json
 import platform
 import traceback
 import spython.main
+from spython.main import Client  # Add this import for instance handling
 from spython.instance import Instance
 
 if platform.system() == 'Linux':
@@ -134,7 +135,8 @@ def run_instance(
         # Build + start instance (instance image should already be built)
         print(f"Running instance {instance_id}...")
         instance_name = build_container(test_spec, None, run_id, logger, rm_image, force_rebuild=True)
-        instance = spython.main.Instance(instance_name)
+        # instance = spython.main.Instance(instance_name)
+        instance = Client.instance.start(str(sif_path), name=instance_name)
         print(f"Instance {instance_id} started.")
 
         # Copy model prediction as patch file to instance
