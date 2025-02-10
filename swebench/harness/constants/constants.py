@@ -3,11 +3,11 @@ from pathlib import Path
 from typing import TypedDict
 
 # Constants - Evaluation Log Directories
-BASE_IMAGE_BUILD_DIR = Path("logs/build_images/base")
-ENV_IMAGE_BUILD_DIR = Path("logs/build_images/env")
-INSTANCE_IMAGE_BUILD_DIR = Path("logs/build_images/instances")
-RUN_EVALUATION_LOG_DIR = Path("logs/run_evaluation")
-RUN_VALIDATION_LOG_DIR = Path("logs/run_validation")
+BASE_IMAGE_BUILD_DIR = Path("/scr/kanishkg/swe/logs/build_images/base")
+ENV_IMAGE_BUILD_DIR = Path("/scr/kanishkg/swe/logs/build_images/env")
+INSTANCE_IMAGE_BUILD_DIR = Path("/scr/kanishkg/swe/logs/build_images/instances")
+RUN_EVALUATION_LOG_DIR = Path("/scr/kanishkg/swe/logs/run_evaluation")
+RUN_VALIDATION_LOG_DIR = Path("/scr/kanishkg/swe/logs/run_validation")
 
 # Constants - Task Instance Class
 class SWEbenchInstance(TypedDict):
