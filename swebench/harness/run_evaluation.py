@@ -4,8 +4,7 @@ import json
 import platform
 import traceback
 import spython.main
-from spython.main import Client  # Add this import for instance handling
-from spython.instance import Instance
+from spython.instance import Instance  # Use Instance directly for instance handling
 
 if platform.system() == 'Linux':
     import resource
@@ -71,7 +70,7 @@ def run_instance(
         pred: dict,
         rm_image: bool,
         force_rebuild: bool,
-        client: None,  # Keep for compatibility but don't use
+        client: None,  # Not used; kept for API compatibility
         run_id: str,
         timeout: int | None = None,
         rewrite_reports: bool = False,
@@ -121,7 +120,7 @@ def run_instance(
         if not image_build_link.exists():
             try:
                 image_build_link.symlink_to(build_dir.absolute(), target_is_directory=True)
-            except:
+            except Exception:
                 pass
     
     # Set up logger
@@ -136,8 +135,8 @@ def run_instance(
         print(f"Running instance {instance_id}...")
         sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
         instance_name = build_container(test_spec, None, run_id, logger, rm_image, force_rebuild=True)
-        # instance = spython.main.Instance(instance_name)
-        instance = Client.instance.start(str(sif_path), name=instance_name)
+        # Start the instance using the spython Instance API
+        instance = Instance.start(str(sif_path), name=instance_name)
         print(f"Instance {instance_id} started.")
 
         # Copy model prediction as patch file to instance
@@ -151,13 +150,13 @@ def run_instance(
         # Attempt to apply patch to instance
         applied_patch = False
         for git_apply_cmd in GIT_APPLY_CMDS:
-            output, _ = spython.main.execute(
+            output, exit_code = spython.main.execute(
                 instance, 
                 f"{git_apply_cmd} {DOCKER_PATCH}".split(),
                 workdir=DOCKER_WORKDIR,
                 return_result=True
             )
-            if _ == 0:  # exitcode
+            if exit_code == 0:
                 logger.info(f"{APPLY_PATCH_PASS}:\n{output}")
                 applied_patch = True
                 break
@@ -457,4 +456,4 @@ if __name__ == "__main__":
     parser.add_argument("--modal", type=str2bool, default=False, help="Run on Modal")
 
     args = parser.parse_args()
-    main(**vars(args)) 
+    main(**vars(args))
