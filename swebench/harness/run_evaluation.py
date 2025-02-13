@@ -140,6 +140,10 @@ def run_instance(
         # Start the instance using the spython Instance API
 
         options = ["--bind", "/scr/kanishkg/testbed:/testbed"]
+        options = [
+            "--bind", "/scr/kanishkg/testbed:/testbed",
+            "--writable-tmpfs", DOCKER_WORKDIR,
+]
         instance = Client.instance(str(sif_path), name=instance_name, options=options)
 
 
