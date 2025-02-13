@@ -356,6 +356,7 @@ def build_container(
         print(f"Pulling image {test_spec.instance_image_key}...")
         try:
             cmd = ["singularity", "pull", f"{test_spec.instance_image_key}.sif", f"docker://{test_spec.instance_image_key}"]
+            print(f"running: {cmd}")
             process = subprocess.run(cmd, capture_output=True, text=True)
             if process.returncode != 0:
                 print(f"Failed to pull image: {process.stderr}")
@@ -366,6 +367,7 @@ def build_container(
             print(f"Moving image to {INSTANCE_IMAGE_BUILD_DIR}")
             sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
             sif_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"running: mv {test_spec.instance_image_key}.sif {sif_path}")
             subprocess.run(["mv", f"{test_spec.instance_image_key}.sif", str(sif_path)], check=True)
             print(f"Image moved to {sif_path}")
 
@@ -379,7 +381,6 @@ def build_container(
         
         instance_name = test_spec.get_instance_container_name(run_id)
         sif_path = INSTANCE_IMAGE_BUILD_DIR / f"{test_spec.instance_image_key.replace(':', '_')}.sif"
-        print(f"running: {sif_path}")
         
         cmd = [
             "singularity",
@@ -389,6 +390,7 @@ def build_container(
             instance_name
         ]
 
+        print(f"running: {cmd}")
         process = subprocess.run(cmd, capture_output=True, text=True)
         if process.returncode != 0:
             print(f"Failed to start instance: {process.stderr}")
