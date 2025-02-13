@@ -142,9 +142,7 @@ def run_instance(
         options = ["--bind", "/scr/kanishkg/testbed:/testbed"]
         options = [
             "--bind", "/scr/kanishkg/testbed:/testbed",
-            "--bind", "/scr/kanishkg/tmp:/tmp",
             "--writable-tmpfs", DOCKER_WORKDIR,
-            "--writable-tmpfs", "/tmp",
 ]
         instance = Client.instance(str(sif_path), name=instance_name, options=options)
 
